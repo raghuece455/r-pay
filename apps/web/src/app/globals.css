@@ -1,0 +1,69 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #111827;
+  --color-rice: #fbf7ef;
+  --color-midnight: #172554;
+  --color-indigo: #263a8b;
+  --color-aqua: #26d7c4;
+  --color-emerald: #10b981;
+  --color-amber: #f59e0b;
+  --color-danger: #ef4444;
+  --color-plum: #5945a7;
+  --color-ops: #0b1018;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #fbf7ef;
+  color: #111827;
+  font-family:
+    Inter,
+    Manrope,
+    "Plus Jakarta Sans",
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+::selection {
+  background: #26d7c4;
+  color: #0b1018;
+}
+
+.rpay-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(15, 23, 42, 0.24) transparent;
+}
+
+.ops-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.28) transparent;
+}
+
+nextjs-portal,
+[data-nextjs-dev-tools-button],
+[data-nextjs-toast] {
+  display: none !important;
+}

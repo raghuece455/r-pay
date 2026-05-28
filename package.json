@@ -1,0 +1,36 @@
+{
+  "name": "r-pay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "R-Pay, a fictional UPI-style payment simulation for learning production engineering and Claude Code agent workflows.",
+  "packageManager": "pnpm@10.11.0",
+  "scripts": {
+    "dev": "concurrently -n web,api,worker -c cyan,green,magenta \"pnpm --filter @rpay/web dev\" \"pnpm --filter @rpay/api dev\" \"pnpm --filter @rpay/worker dev\"",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "db:migrate": "prisma migrate dev --name init",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio",
+    "seed": "tsx prisma/seed.ts",
+    "simulate:normal": "tsx scripts/simulate-normal-traffic.ts",
+    "simulate:incident": "tsx scripts/simulate-midnight-retry-storm.ts",
+    "reset:demo": "tsx scripts/reset-demo.ts",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "@prisma/client": "^6.8.2",
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "prettier": "^3.5.3",
+    "prisma": "^6.8.2",
+    "typescript": "5.8.3"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  }
+}

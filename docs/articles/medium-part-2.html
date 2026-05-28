@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Turning Claude into R-Pay's Incident Response Team — Part 2</title>
+<style>
+  body { font-family: Georgia, serif; max-width: 740px; margin: 40px auto;
+         line-height: 1.8; color: #292929; padding: 0 20px; }
+  h1   { font-size: 2.1em; font-weight: 700; margin-bottom: 0.2em; line-height: 1.25; }
+  h2   { font-size: 1.45em; font-weight: 700; margin-top: 2.2em; margin-bottom: 0.4em; }
+  h3   { font-size: 1.15em; font-weight: 700; margin-top: 1.6em; margin-bottom: 0.3em; }
+  p    { margin: 1em 0; }
+  pre  { background: #f4f4f4; padding: 18px; border-radius: 5px;
+         overflow-x: auto; font-size: 0.85em; line-height: 1.5; }
+  code { font-family: 'Courier New', monospace; }
+  p code, li code { background: #f0f0f0; padding: 2px 6px;
+                    border-radius: 3px; font-size: 0.88em; }
+  hr   { border: none; border-top: 1px solid #e0e0e0; margin: 2.2em 0; }
+  blockquote { border-left: 3px solid #f5a623; margin: 1.5em 0;
+               padding: 0.6em 1.5em; color: #555; font-style: italic;
+               background: #fffbf3; }
+  table { border-collapse: collapse; width: 100%; margin: 1.5em 0; font-size: 0.91em; }
+  th, td { border: 1px solid #ddd; padding: 9px 14px; text-align: left; }
+  th   { background: #f5f5f5; font-weight: 700; }
+  ul, ol { margin: 1em 0; padding-left: 2em; }
+  li   { margin: 0.45em 0; }
+  .caption { font-size: 0.82em; color: #757575; text-align: center;
+             margin-top: -0.5em; margin-bottom: 1.5em; font-style: italic; }
+  img  { width: 100%; border-radius: 8px; margin: 1em 0; border: 1px solid #e8e8e8; }
+  .series-nav { background: #f0f7ff; border-left: 4px solid #2563eb; padding: 12px 18px;
+                margin: 1.5em 0; border-radius: 4px; font-size: 0.93em; }
+</style>
+</head>
+<body>
+
+<p class="series-nav">
+  <strong>Claude Agents &amp; R-Pay — 3-Part Series</strong><br>
+  Part 1: Building the payment app with Claude Code<br>
+  <strong>Part 2:</strong> Turning Claude into an incident response team (you are here)<br>
+  Part 3: The Midnight Retry Storm — investigate, fix, deploy, write the RCA
+</p>
+
+<h1>Turning Claude into R-Pay's Incident Response Team</h1>
+
+<p><em>The worst time to teach Claude your payment system is during an incident. So we prepare before midnight.</em></p>
+
+<p><em>Read time: ~15 minutes</em></p>
+
+<hr>
+
+<h2>The problem with "just ask Claude" during an incident</h2>
+
+<p>Imagine the pager fires at 12:07 AM.</p>
+
+<p>Payment success rate is dropping. Latency is spiking. The database pool is turning red. A release went out thirty minutes ago, but nobody remembers exactly what it changed.</p>
+
+<p>You open Claude Code and type:</p>
+
+<pre>Please investigate.</pre>
+
+<p>That is too late.</p>
+
+<p>During an incident, you do not want to teach Claude what R-Pay is, which services exist, which actions are dangerous, how payment states work, or who must approve rollback. You want Claude to already know.</p>
+
+<p>Part 1 gave us a working R-Pay payment sandbox. Part 2 turns that codebase into an incident-ready system.</p>
+
+<hr>
+
+<h2>Claude Code's memory model: how it actually works</h2>
+
+<p>To use Claude Code well during incidents, you need to understand how it holds information. There are several layers, and each has a different job.</p>
+
+<h3>Layer 1: The current session context</h3>
+
+<p>Claude Code holds everything from the current conversation in its context window. This is temporary. When you close the session, it is gone.</p>
+
+<p>This is enough for a single task — "edit this function" — but not for recurring rules like "always require human approval for rollback."</p>
+
+<h3>Layer 2: CLAUDE.md — project memory you write on purpose</h3>
+
+<p><code>CLAUDE.md</code> is a Markdown file at your repo root. Claude Code reads it at the start of every session. It is how you persist rules across sessions without repeating yourself in every prompt.</p>
+
+<p>For R-Pay, <code>CLAUDE.md</code> contains the rules that must never be forgotten:</p>
+
+<pre>## Safety Boundary
+- Do not use real UPI APIs, bank APIs, or NPCI credentials
+- Payment code is high-risk
+- Every payment requires an idempotency key
+- Do not mark a payment SUCCESS without simulator confirmation
+- Do not delete audit logs
+- Production-like deployment or rollback requires human approval
+
+## Engineering Rules
+- Shared payment states live in packages/shared
+- API routes live in apps/api
+- Worker retry behavior lives in apps/worker
+- Run tests after changing payment state logic</pre>
+
+<p>These rules show up in every session without you typing them.</p>
+
+<h3>Layer 3: Auto memory — what Claude discovers itself</h3>
+
+<p>Auto memory is memory Claude Code can write for itself when it learns something useful. For example, if Claude discovers that your repo uses pnpm (not npm), it can save that so it does not have to re-discover it.</p>
+
+<p>For high-risk rules in payment systems, keep them in <code>CLAUDE.md</code> where you can review them. Use auto memory for workflow friction (like "this test needs a specific environment variable"), not safety rules.</p>
+
+<h3>Layer 4: Skills — reusable workflows you define</h3>
+
+<p>A skill is a reusable task instruction. Instead of typing the same multi-step prompt over and over, you define a skill once and invoke it by name.</p>
+
+<p>For example, an <code>investigate-payment-incident</code> skill would tell Claude to:</p>
+<ol>
+  <li>Read <code>CLAUDE.md</code> and the payment runbook</li>
+  <li>Check current metrics and active incidents</li>
+  <li>Inspect recent deployments</li>
+  <li>Inspect logs and traces</li>
+  <li>Form hypotheses with supporting evidence</li>
+  <li>Recommend mitigation options</li>
+  <li>Flag which actions require human approval</li>
+</ol>
+
+<p>You run that skill with one command at 2 AM instead of typing all seven steps while panicking.</p>
+
+<h3>Layer 5: Hooks — automatic safety gates</h3>
+
+<p>Hooks are commands that run automatically at lifecycle events. Unlike <code>CLAUDE.md</code> rules (which Claude reads but could theoretically ignore), hooks run regardless.</p>
+
+<p>For R-Pay, useful hooks would include:</p>
+
+<ul>
+  <li><strong>Pre-task hook</strong>: run <code>pnpm test</code> before marking anything complete</li>
+  <li><strong>State machine change hook</strong>: require tests when <code>state-machine.ts</code> is modified</li>
+  <li><strong>Deploy hook</strong>: block production-like actions without an explicit approval flag</li>
+  <li><strong>Audit log hook</strong>: warn if code changes would delete from the audit log table</li>
+</ul>
+
+<p>Hooks are where you stop relying on memory alone. They make safety automatic.</p>
+
+<hr>
+
+<h2>The full memory and extension hierarchy</h2>
+
+<pre>Current chat context
+    │
+    └─► CLAUDE.md (project rules, every session)
+            │
+            └─► Skills (reusable multi-step workflows)
+                    │
+                    └─► Hooks (automatic safety gates)
+                            │
+                            └─► Subagents (focused investigators)
+                                    │
+                                    └─► Agent teams (parallel independent perspectives)
+                                            │
+                                            └─► Agent SDK / Managed Agents (custom automation)</pre>
+
+<p>Start at the top. Add layers only when they earn their keep.</p>
+
+<table>
+  <tr><th>What you need</th><th>Use this</th></tr>
+  <tr><td>Remember facts every session</td><td><code>CLAUDE.md</code></td></tr>
+  <tr><td>Repeat a multi-step workflow</td><td>Skill</td></tr>
+  <tr><td>Enforce a safety check automatically</td><td>Hook</td></tr>
+  <tr><td>Investigate a focused area</td><td>Subagent</td></tr>
+  <tr><td>Compare multiple independent hypotheses</td><td>Agent team</td></tr>
+  <tr><td>Build a custom agent automation</td><td>Agent SDK</td></tr>
+  <tr><td>Run a hosted long-running agent</td><td>Managed Agents</td></tr>
+  <tr><td>Take a risky production action</td><td>Human approval</td></tr>
+</table>
+
+<hr>
+
+<h2>What is a subagent and when do you use one?</h2>
+
+<p>A subagent is a focused Claude Code helper with its own context and a narrow job. When you ask Claude to use a subagent, it spins up a focused session that investigates one specific area and reports back.</p>
+
+<p>Think of it like having a team where each person specialises:</p>
+
+<ul>
+  <li><strong>log-analyst</strong> — searches logs for patterns, correlates trace IDs, builds a timeline of events</li>
+  <li><strong>trace-analyst</strong> — reads distributed traces, identifies slow spans, maps pressure to services</li>
+  <li><strong>reliability-engineer</strong> — analyses retry behavior, queue depth, database pool saturation</li>
+  <li><strong>release-manager</strong> — correlates incidents with deployments, prepares rollback plans</li>
+  <li><strong>incident-commander</strong> — coordinates the investigation, synthesises findings, recommends actions</li>
+  <li><strong>postmortem-writer</strong> — drafts RCA from timeline and evidence</li>
+</ul>
+
+<p>Each subagent has a safety boundary explicitly written into its definition. The log analyst, for example, must not recommend direct database edits. The release manager must require human approval before any deployment action. These rules are not optional hints — they are part of the subagent's instructions.</p>
+
+<h3>Why not just use one big Claude session?</h3>
+
+<p>You can. For simple incidents, one Claude session is faster and cheaper. Subagents cost more context.</p>
+
+<p>Use subagents when:</p>
+
+<ul>
+  <li>The investigation task is large enough to fill the context window</li>
+  <li>You need a specialist to focus on one area without distraction</li>
+  <li>You want to run parallel investigations simultaneously</li>
+</ul>
+
+<p>For R-Pay's Midnight Retry Storm, the log analyst, trace analyst, and reliability engineer can investigate in parallel. Each brings back independent findings. That is faster than one session doing all three jobs serially.</p>
+
+<hr>
+
+<h2>Subagents vs agent teams: what's the difference?</h2>
+
+<table>
+  <tr>
+    <th>Question</th>
+    <th>Subagent</th>
+    <th>Agent team</th>
+  </tr>
+  <tr>
+    <td>How many Claude sessions?</td>
+    <td>One main + focused helpers</td>
+    <td>Multiple independent sessions</td>
+  </tr>
+  <tr>
+    <td>Communication style</td>
+    <td>Subagent reports back to you</td>
+    <td>Teammates can coordinate with each other</td>
+  </tr>
+  <tr>
+    <td>Best for</td>
+    <td>Focused investigation or review</td>
+    <td>Parallel exploration with multiple perspectives</td>
+  </tr>
+  <tr>
+    <td>Cost and overhead</td>
+    <td>Lower</td>
+    <td>Higher</td>
+  </tr>
+  <tr>
+    <td>R-Pay example</td>
+    <td>Ask log-analyst to summarise timeout logs</td>
+    <td>Have reliability, release, and test teammates compare rollback vs hotfix</td>
+  </tr>
+</table>
+
+<p>Use subagents when you need focused workers. Use agent teams when the problem benefits from genuine disagreement between perspectives.</p>
+
+<p>Do not use agent teams for every task. If the next step is obvious, a single Claude Code session plus tests is faster and cheaper.</p>
+
+<hr>
+
+<h2>Where Agent SDK and Managed Agents fit</h2>
+
+<p>The R-Pay demo does not call a real Claude API. Its AI incident analysis and RCA panels are generated from local templates. That is intentional for a local sandbox.</p>
+
+<p>If you wanted to build a real internal engineering assistant on top of R-Pay's architecture, here is where the bigger tools would come in:</p>
+
+<table>
+  <tr>
+    <th>Option</th>
+    <th>Use when</th>
+    <th>R-Pay example</th>
+  </tr>
+  <tr>
+    <td><strong>Agent SDK</strong></td>
+    <td>You want to run a custom agent workflow in your own service or CI job</td>
+    <td>A scheduled agent that reads recent deployments and opens a PR with runbook updates</td>
+  </tr>
+  <tr>
+    <td><strong>Managed Agents</strong></td>
+    <td>You want Anthropic to host a long-running agent with persistent environment</td>
+    <td>A production on-call assistant that watches incident tickets and prepares evidence summaries with approval gates</td>
+  </tr>
+</table>
+
+<p>The safety rule stays the same regardless of which tool you use:</p>
+
+<blockquote>More automation does not remove human approval for risky payment actions.</blockquote>
+
+<hr>
+
+<h2>IncidentDesk: the shared evidence board</h2>
+
+<p>IncidentDesk is the ops surface of R-Pay. It is not just a dashboard — it is the place where humans and agents share the same evidence.</p>
+
+<img src="https://raw.githubusercontent.com/raghuece455/r-pay/main/screenshots/ops-health-final.png" alt="IncidentDesk payment health dashboard">
+<p class="caption">IncidentDesk payment health dashboard: success rate, P95 latency, queue depth, DB pool usage, and retry rate — the metrics that tell the incident story fast.</p>
+
+<p>The dashboard shows:</p>
+
+<ul>
+  <li>Payment success rate and failure rate</li>
+  <li>P95 latency (milliseconds to seconds is a clear signal)</li>
+  <li>Pending payment count</li>
+  <li>Status reconciler queue depth</li>
+  <li>Database connection pool usage</li>
+  <li>Payment network simulator latency</li>
+  <li>Retry rate (healthy vs unsafe)</li>
+  <li>Service health for all five services</li>
+</ul>
+
+<p>These metrics matter together, not individually. A retry rate spike means nothing if you do not also see where queue depth and DB pool usage went. The dashboard puts all of them on one screen so the incident story is visible at a glance.</p>
+
+<hr>
+
+<h2>Logs and traces: finding the evidence</h2>
+
+<img src="https://raw.githubusercontent.com/raghuece455/r-pay/main/screenshots/ops-logs-final.png" alt="Logs and traces browser">
+<p class="caption">Logs and traces browser: filters, trace IDs, and expanded log entries help Claude's log-analyst subagent build a timeline from noisy signals.</p>
+
+<p>During an incident, a log analyst should not just dump logs. It should answer:</p>
+
+<ul>
+  <li>What changed compared to the normal baseline?</li>
+  <li>Which service is generating the most noise?</li>
+  <li>Which trace IDs connect across services?</li>
+  <li>Are the failures user-facing or background-only?</li>
+  <li>What evidence supports or contradicts the current hypothesis?</li>
+</ul>
+
+<p>When the Midnight Retry Storm hits, the key log entries look like this:</p>
+
+<pre>00:10:14Z WARN  status-reconciler retry_storm.detected
+  retryRatePerMin=16500 queueDepth=98200 dbPoolUsage=100
+
+00:10:35Z ERROR payment-api db_pool.saturated
+  p95LatencyMs=4800 pendingPayments=3296
+
+00:11:02Z WARN  upi-switch-simulator latency.threshold_exceeded
+  latencyMs=5100 mode=slow</pre>
+
+<p>Three log lines. Three different services. One incident. The log analyst's job is to connect those dots before the team spends an hour looking in the wrong place.</p>
+
+<hr>
+
+<h2>Deployment history: the fastest path to a hypothesis</h2>
+
+<img src="https://raw.githubusercontent.com/raghuece455/r-pay/main/screenshots/ops-deployments-final.png" alt="Deployment history with suspicious release highlighted">
+<p class="caption">Deployment history: the suspicious worker release is immediately visible next to the incident start time.</p>
+
+<p>One of the most reliable patterns in production incidents is: <em>something changed recently</em>. The deployment history page makes that visible immediately.</p>
+
+<p>In the Midnight Retry Storm, the suspicious release is:</p>
+
+<pre>rpay-worker-2026.05.28-001
+Service: status-reconciler
+Change: Changed status reconciler retry polling behavior
+Risk: High
+Linked incident: The Midnight Retry Storm</pre>
+
+<p>That link between deployment and incident is the first hypothesis the release-manager subagent would surface. It takes a few seconds to see on the dashboard and would have taken thirty minutes to find by reading git history in a panic.</p>
+
+<hr>
+
+<h2>Runbooks: the incident playbook that actually works at 2 AM</h2>
+
+<img src="https://raw.githubusercontent.com/raghuece455/r-pay/main/screenshots/ops-runbooks-final.png" alt="Runbook viewer">
+<p class="caption">Runbook viewer: step-by-step response procedure that works when your brain is running at half speed.</p>
+
+<p>A good runbook is short and concrete. R-Pay's payment incident runbook:</p>
+
+<ol>
+  <li>Confirm the alert scope and declare the incident severity</li>
+  <li>Check success rate, latency, pending count, queue depth, and DB pool in IncidentDesk</li>
+  <li>Check recent deployments — look for changes in the last two hours</li>
+  <li>Check payment network latency</li>
+  <li>Check status reconciler queue depth and retry rate</li>
+  <li>Check database connection pool saturation</li>
+  <li>Decide: rollback vs feature flag vs hotfix</li>
+  <li>Get human approval for any action</li>
+  <li>Monitor recovery for 10 stable minutes</li>
+  <li>Generate RCA draft from timeline and evidence</li>
+</ol>
+
+<p>Ten steps. No fluff. Readable when you have been awake since midnight.</p>
+
+<hr>
+
+<h2>The AI incident analysis panel</h2>
+
+<p>IncidentDesk includes an AI incident analysis panel. In the local sandbox, this is generated from templates and simulated evidence — it does not call a real Claude API.</p>
+
+<p>But the panel structure matches how a real incident commander subagent should report:</p>
+
+<ul>
+  <li><strong>Confidence</strong> — how certain is the hypothesis?</li>
+  <li><strong>Current hypothesis</strong> — what do we think is happening and why?</li>
+  <li><strong>Evidence</strong> — what facts support the hypothesis?</li>
+  <li><strong>Recommended mitigation</strong> — what should we do right now?</li>
+  <li><strong>Human approval requirement</strong> — what needs a human to sign off?</li>
+</ul>
+
+<p>The last point is the most important. Claude is useful for gathering context and forming hypotheses. The human owns the decision and the accountability.</p>
+
+<hr>
+
+<h2>The rules vs skills vs hooks distinction, simply</h2>
+
+<p>Developers often mix these up. Here is the practical version:</p>
+
+<table>
+  <tr><th>Concept</th><th>What it is</th><th>R-Pay example</th></tr>
+  <tr>
+    <td><strong>Rule</strong> (in CLAUDE.md)</td>
+    <td>A persistent fact Claude sees every session</td>
+    <td>"Never mark SUCCESS without payment network confirmation"</td>
+  </tr>
+  <tr>
+    <td><strong>Skill</strong></td>
+    <td>A reusable multi-step workflow you define once and invoke by name</td>
+    <td><code>/investigate-payment-incident</code> — gathers metrics, logs, deployments, forms hypotheses</td>
+  </tr>
+  <tr>
+    <td><strong>Hook</strong></td>
+    <td>An automatic gate that runs regardless of what Claude was planning to do</td>
+    <td>Run <code>pnpm test</code> before task completion; block deploy without approval flag</td>
+  </tr>
+</table>
+
+<p>If Claude needs to remember a fact, put it in <code>CLAUDE.md</code>.</p>
+
+<p>If Claude needs to follow a multi-step process repeatedly, make it a skill.</p>
+
+<p>If something must run regardless of Claude's judgment, make it a hook.</p>
+
+<hr>
+
+<h2>Common mistake: teaching Claude only through chat</h2>
+
+<p>If you paste the same safety rule into every prompt, the project is telling you something. That rule belongs in <code>CLAUDE.md</code>, a skill, or a hook.</p>
+
+<p>Bad pattern:</p>
+
+<pre>Remember again that payment SUCCESS needs confirmation from the switch simulator...</pre>
+
+<p>Better pattern:</p>
+
+<ul>
+  <li>Put the rule in <code>CLAUDE.md</code></li>
+  <li>Add a test that proves the rule is enforced</li>
+  <li>Add a hook that detects state machine changes</li>
+  <li>Ask a security-reviewer subagent to check payment safety</li>
+</ul>
+
+<p>Chat context is temporary. Repo memory is durable. The difference matters at 2 AM when you open a new session and cannot remember what you already told Claude.</p>
+
+<hr>
+
+<h2>Checklist: is your system incident-ready?</h2>
+
+<ul>
+  <li>☐ <code>CLAUDE.md</code> explains the product boundary and all payment rules</li>
+  <li>☐ Skills exist for repeat incident workflows (investigate, generate-rca, prepare-rollback)</li>
+  <li>☐ Hooks protect high-risk operations (tests required, deploy blocked without approval)</li>
+  <li>☐ Subagents have narrow roles and explicit safety rules</li>
+  <li>☐ Agent teams are reserved for problems that need parallel perspectives</li>
+  <li>☐ IncidentDesk shows metrics, logs, traces, deployments, and runbooks in one place</li>
+  <li>☐ Rollback and deployment actions require human approval — in the UI, not just in policy</li>
+  <li>☐ RCA drafting is based on evidence, not guesswork</li>
+</ul>
+
+<hr>
+
+<h2>What's next: the storm actually hits</h2>
+
+<p>R-Pay is now incident-ready. It has a payment flow, project memory, safety rules, runbooks, telemetry, deployment history, and an IncidentDesk dashboard with approval-gated actions.</p>
+
+<p>In <strong>Part 3</strong>, it breaks at midnight.</p>
+
+<p>The success rate drops from 99.2% to 91.4%. P95 latency jumps from 280 ms to 4.8 seconds. The database pool hits 100%. The status reconciler queue explodes from 1,200 to 98,200.</p>
+
+<p>And this time, Claude is not meeting the system for the first time. It already knows the rules.</p>
+
+<hr>
+
+<p><em>R-Pay is open source: <a href="https://github.com/raghuece455/r-pay">github.com/raghuece455/r-pay</a></em></p>
+<p><em>Tags: Claude Code, SRE, Incident Response, AI Agents, Observability</em></p>
+
+</body>
+</html>

@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>The Midnight R-Pay Outage: How Claude Agents Investigate, Fix, Deploy, and Write the RCA — Part 3</title>
+<style>
+  body { font-family: Georgia, serif; max-width: 740px; margin: 40px auto;
+         line-height: 1.8; color: #292929; padding: 0 20px; }
+  h1   { font-size: 2.1em; font-weight: 700; margin-bottom: 0.2em; line-height: 1.25; }
+  h2   { font-size: 1.45em; font-weight: 700; margin-top: 2.2em; margin-bottom: 0.4em; }
+  h3   { font-size: 1.15em; font-weight: 700; margin-top: 1.6em; margin-bottom: 0.3em; }
+  p    { margin: 1em 0; }
+  pre  { background: #f4f4f4; padding: 18px; border-radius: 5px;
+         overflow-x: auto; font-size: 0.85em; line-height: 1.5; }
+  code { font-family: 'Courier New', monospace; }
+  p code, li code { background: #f0f0f0; padding: 2px 6px;
+                    border-radius: 3px; font-size: 0.88em; }
+  hr   { border: none; border-top: 1px solid #e0e0e0; margin: 2.2em 0; }
+  blockquote { border-left: 3px solid #f5a623; margin: 1.5em 0;
+               padding: 0.6em 1.5em; color: #555; font-style: italic;
+               background: #fffbf3; }
+  table { border-collapse: collapse; width: 100%; margin: 1.5em 0; font-size: 0.91em; }
+  th, td { border: 1px solid #ddd; padding: 9px 14px; text-align: left; }
+  th   { background: #f5f5f5; font-weight: 700; }
+  ul, ol { margin: 1em 0; padding-left: 2em; }
+  li   { margin: 0.45em 0; }
+  .caption { font-size: 0.82em; color: #757575; text-align: center;
+             margin-top: -0.5em; margin-bottom: 1.5em; font-style: italic; }
+  img  { width: 100%; border-radius: 8px; margin: 1em 0; border: 1px solid #e8e8e8; }
+  .series-nav { background: #f0f7ff; border-left: 4px solid #2563eb; padding: 12px 18px;
+                margin: 1.5em 0; border-radius: 4px; font-size: 0.93em; }
+  .warroom { background: #0f172a; color: #e2e8f0; padding: 18px 20px; border-radius: 8px;
+             margin: 1.5em 0; font-family: 'Courier New', monospace; font-size: 0.87em;
+             line-height: 1.7; }
+  .warroom .time { color: #64748b; }
+  .warroom .name { color: #38bdf8; font-weight: bold; }
+  .warroom .msg  { color: #e2e8f0; }
+  .warroom .alert { color: #f87171; font-weight: bold; }
+  .warroom .good  { color: #34d399; }
+</style>
+</head>
+<body>
+
+<p class="series-nav">
+  <strong>Claude Agents &amp; R-Pay — 3-Part Series</strong><br>
+  Part 1: Building the payment app with Claude Code<br>
+  Part 2: Turning Claude into an incident response team<br>
+  <strong>Part 3:</strong> The Midnight Retry Storm — investigate, fix, deploy, write the RCA (you are here)
+</p>
+
+<h1>The Midnight R-Pay Outage: How Claude Agents Investigate, Fix, Deploy, and Write the RCA</h1>
+
+<p><em>A realistic simulated payment incident where Claude helps the on-call team investigate safely — but humans approve every production action.</em></p>
+
+<p><em>Read time: ~16 minutes</em></p>
+
+<hr>
+
+<h2>12:07 AM</h2>
+
+<p>The phone buzzes.</p>
+
+<p>Not the gentle notification buzz. The pager buzz — the one that means something is wrong with the payment system right now.</p>
+
+<p>Raghu opens his laptop. IncidentDesk loads.</p>
+
+<img src="https://raw.githubusercontent.com/raghuece455/r-pay/main/screenshots/ops-health-final.png" alt="IncidentDesk during the Midnight Retry Storm">
+<p class="caption">IncidentDesk at 12:07 AM: every metric tells the same story. The payment system is sick.</p>
+
+<table>
+  <tr><th>Signal</th><th>Normal</th><th>Right now</th></tr>
+  <tr><td>Payment success rate</td><td>99.2%</td><td style="color:#c0392b;font-weight:700">91.4%</td></tr>
+  <tr><td>P95 latency</td><td>280 ms</td><td style="color:#c0392b;font-weight:700">4,800 ms</td></tr>
+  <tr><td>Pending transactions</td><td>412</td><td style="color:#c0392b;font-weight:700">3,296 (8× higher)</td></tr>
+  <tr><td>DB pool usage</td><td>42%</td><td style="color:#c0392b;font-weight:700">100% (saturated)</td></tr>
+  <tr><td>Queue depth</td><td>1,200</td><td style="color:#c0392b;font-weight:700">98,200</td></tr>
+  <tr><td>Retry rate</td><td>140/min</td><td style="color:#c0392b;font-weight:700">16,500/min</td></tr>
+  <tr><td>Payment network latency</td><td>310 ms</td><td style="color:#c0392b;font-weight:700">5,100 ms</td></tr>
+</table>
+
+<p>Users are seeing their payments stuck in PENDING. Confirmations are delayed across the board. R-Pay is not moving real money — it is a sandbox — but the incident pattern is real enough to make any on-call engineer sit up straight.</p>
+
+<p>This is <strong>The Midnight Retry Storm</strong>.</p>
+
+<hr>
+
+<h2>The war room opens</h2>
+
+<div class="warroom">
+  <div><span class="time">12:07 AM</span> <span class="alert">🚨 ALERT: Payment success rate below P1 threshold (91.4% &lt; 95%)</span></div>
+  <div><span class="time">12:08 AM</span> <span class="name">Asha [incident-commander]:</span> <span class="msg">P1 declared. Payment confirmations are delayed. Starting read-only investigation. Nobody touches anything until we have evidence.</span></div>
+  <div><span class="time">12:10 AM</span> <span class="name">Meera [log-analyst]:</span> <span class="msg">Status reconciler retry logs show a spike immediately after last deployment. Retry rate went from 140/min to 16,500/min in under 5 minutes.</span></div>
+  <div><span class="time">12:12 AM</span> <span class="name">Kabir [trace-analyst]:</span> <span class="msg">Confirmed. DB write latency traces show the reconciler loop is hammering the payment_attempt table. API writes are queueing behind it.</span></div>
+  <div><span class="time">12:14 AM</span> <span class="name">Dev [code-investigator]:</span> <span class="msg">Found it. Worker release rpay-worker-2026.05.28-001 replaced exponential backoff with fixed 1-second polling. No jitter. No retry budget. No circuit breaker.</span></div>
+  <div><span class="time">12:17 AM</span> <span class="name">Ravi [reliability-engineer]:</span> <span class="msg">Rollback is the safest immediate mitigation. Payment creation API can stay up — the pressure is entirely from the reconciler. Rollback targets only the worker.</span></div>
+  <div><span class="time">12:22 AM</span> <span class="name">Raghu [on-call]:</span> <span class="msg">Approved. Running rollback simulation. Humans in the loop as required.</span></div>
+  <div><span class="time">12:31 AM</span> <span class="name">Asha [incident-commander]:</span> <span class="msg">Success rate recovering toward 99.1%. Queue depth falling. Continue monitoring for 10 stable minutes before declaring resolved.</span></div>
+  <div><span class="time">12:42 AM</span> <span class="name">Postmortem-writer:</span> <span class="good">RCA draft generated. Ready for human review and PM summary.</span></div>
+</div>
+
+<p>That is 35 minutes from pager to recovery.</p>
+
+<p>Claude did not save production by itself. The team investigated, the humans approved, and Claude helped them move fast without skipping safety.</p>
+
+<hr>
+
+<h2>The first prompt: ask for evidence, not a fix</h2>
+
+<p>The most important discipline in agent-assisted incident response is this: the first prompt should ask for evidence, not a solution.</p>
+
+<pre>We have an active R-Pay payment incident.
+
+Read CLAUDE.md, the architecture docs, the payment runbook,
+metrics, logs, traces, deployments, and worker retry logic.
+
+Return:
+- current customer impact
+- affected services
+- strongest hypotheses with evidence
+- what is unknown
+- immediate mitigation options
+- which actions require human approval
+
+Safety:
+- R-Pay is sandbox-only
+- do not edit payment records directly
+- do not mark PENDING payments SUCCESS
+- do not delete audit logs
+- do not deploy or rollback without approval</pre>
+
+<p>Notice what this prompt does not ask for: a fix. It asks Claude to gather, synthesise, and present. The humans then decide.</p>
+
+<hr>
+
+<h2>The incident detail view: one screen, all evidence</h2>
+
+<img src="https://raw.githubusercontent.com/raghuece455/r-pay/main/screenshots/ops-incident-detail-final.png" alt="Incident detail page">
+<p class="caption">Incident detail: timeline, evidence cards, war room transcript, runbook checklist, approval-gated actions, and RCA panel — everything in one place.</p>
+
+<p>The incident detail page in IncidentDesk brings together:</p>
+
+<ul>
+  <li>Incident title, severity, and current status</li>
+  <li>Impact summary (who is affected, how badly)</li>
+  <li>Affected services</li>
+  <li>Current hypothesis and confidence level</li>
+  <li>Incident timeline with actor names and timestamps</li>
+  <li>Log and trace evidence cards</li>
+  <li>War room transcript</li>
+  <li>Responders and their roles</li>
+  <li>Runbook checklist (with progress)</li>
+  <li>Mitigation actions (approval-gated)</li>
+  <li>Decision log</li>
+  <li>AI incident analysis panel</li>
+  <li>RCA draft panel</li>
+</ul>
+
+<p>Risky actions — rollback, deploy fixed retry logic — require the user to type <code>APPROVE SIMULATION</code> in a modal. Even in a sandbox, we practise the muscle memory of explicit human approval.</p>
+
+<hr>
+
+<h2>What each subagent found</h2>
+
+<h3>The log analyst</h3>
+
+<img src="https://raw.githubusercontent.com/raghuece455/r-pay/main/screenshots/ops-logs-final.png" alt="Logs and traces browser">
+<p class="caption">Logs browser: the retry storm pattern is visible from three log entries across three different services.</p>
+
+<p>The log analyst subagent filtered the noise and surfaced three key log events:</p>
+
+<pre>00:10:14Z WARN  status-reconciler retry_storm.detected
+  retryRatePerMin=16500 queueDepth=98200 dbPoolUsage=100
+
+00:10:35Z ERROR payment-api db_pool.saturated
+  p95LatencyMs=4800 pendingPayments=3296
+
+00:11:02Z WARN  upi-switch-simulator latency.threshold_exceeded
+  latencyMs=5100 mode=slow</pre>
+
+<p>The log analyst's report:</p>
+
+<blockquote>"Top pattern: the status reconciler is retrying at 16,500/min — 118× above the normal budget of 140/min. The retry spike started at 00:08:31Z, three minutes after the latest deployment at 00:05:44Z. DB pool saturation appears secondary to the retry pressure. UPI switch simulator latency is elevated but is not the initiating cause — it worsened the situation by making each retry take longer. What is unknown: whether any PENDING payments have already exceeded their reconciliation TTL."</blockquote>
+
+<p>That is not "root cause found." That is a clear pattern, a timeline, and an honest uncertainty. That is what a good subagent report looks like.</p>
+
+<h3>The trace analyst</h3>
+
+<p>The trace analyst read the distributed trace spans and found the critical shape of the problem:</p>
+
+<pre>payment-api.createPayment         → 280 ms (normal)
+  ├─ db.payment.insert            → 12 ms
+  ├─ db.auditLog.insert           → 8 ms
+  ├─ upi-switch-simulator.pay     → 180 ms
+  ├─ db.paymentAttempt.insert     → 11 ms
+  └─ db.payment.update            → 69 ms (high — pool contention)
+
+status-reconciler.retryLoop       → 4,820 ms (17× slower than normal)
+  ├─ db.pendingPayments.findMany  → 2,100 ms (pool contention)
+  ├─ upi-switch-simulator.status  → 1,900 ms (slow)
+  ├─ db.paymentAttempt.insert     → 380 ms
+  ├─ db.payment.update            → 440 ms
+  └─ [repeating every 1,000 ms with no backoff]</pre>
+
+<p>The trace tells the whole story. The payment creation API itself is mostly healthy. The problem is the reconciler running every second, consuming database connections that the API also needs.</p>
+
+<h3>The code investigator</h3>
+
+<p>The code investigator read the worker source and the shared retry logic:</p>
+
+<pre><code>// apps/worker/src/index.ts (buggy mode — what shipped in the bad release)
+// STATUS_RECONCILER_MODE = "buggy"
+// Fixed 1-second polling. No exponential backoff. No jitter. No retry budget.
+// Every pending payment fires a new DB query every second.
+
+// packages/shared/src/retry.ts (healthy mode — what it should be)
+// Exponential backoff: 2^attempt * baseDelayMs
+// Jitter: ±30% randomisation to prevent thundering herd
+// Retry budget: max 3 attempts per payment per window
+// Circuit breaker: pause reconciliation if UPI switch is slow</code></pre>
+
+<p>The investigation prompt for this role:</p>
+
+<pre>Investigate the R-Pay worker retry logic.
+
+Read:
+- apps/worker/src/index.ts
+- packages/shared/src/retry.ts
+- tests for retry behavior
+- deployment history for the active incident
+
+Answer:
+- what changed in retry behavior
+- why it increased DB pressure
+- why user-facing payment APIs slowed down
+- whether rollback or hotfix is safer right now
+- which tests should be added or strengthened</pre>
+
+<h3>The reliability engineer</h3>
+
+<p>The reliability engineer's job was to connect all the dots into one coherent failure loop:</p>
+
+<pre>UPI Switch Simulator becomes slow (latency: 310 ms → 5,100 ms)
+        │
+        ▼
+Status Reconciler polls every 1 second (no backoff, no jitter)
+        │
+        ▼
+Each of 3,296 PENDING payments generates a DB read + write every second
+        │
+        ▼
+Queue depth: 1,200 → 98,200
+        │
+        ▼
+DB connection pool reaches 100% — no connections left for Payment API
+        │
+        ▼
+Payment API latency: 280 ms → 4,800 ms
+        │
+        ▼
+Users see new payments stuck in PROCESSING or PENDING
+        │
+        ▼
+More PENDING payments → more reconciler pressure → loop continues</pre>
+
+<p>This is a classic cascading failure: one service's poor behaviour under pressure overloads a shared resource (the database pool), which degrades a completely different service (the payment API) that happens to share that resource.</p>
+
+<p>The critical insight from the reliability engineer: "The database was not the root cause. It was the victim. Fixing the database connection settings would only buy time. The root cause is the retry behavior."</p>
+
+<hr>
+
+<h2>Deployment correlation: the fastest hypothesis</h2>
+
+<img src="https://raw.githubusercontent.com/raghuece455/r-pay/main/screenshots/ops-deployments-final.png" alt="Deployment history showing the suspicious worker release">
+<p class="caption">Deployment history: the suspicious release is immediately visible. The timing matches the incident start exactly.</p>
+
+<p>The deployment page shows:</p>
+
+<table>
+  <tr><th>Version</th><th>Service</th><th>Deployed at</th><th>Risk</th><th>Linked incident</th></tr>
+  <tr><td><code>rpay-worker-2026.05.28-001</code></td><td>status-reconciler</td><td>00:05:44Z</td><td style="color:#c0392b;font-weight:700">High</td><td>The Midnight Retry Storm</td></tr>
+  <tr><td><code>rpay-worker-2026.05.28-002</code></td><td>status-reconciler</td><td>00:22:11Z</td><td>Medium</td><td>Recovery deployment</td></tr>
+  <tr><td><code>rpay-api-2026.05.27-003</code></td><td>payment-api</td><td>22:14:00Z</td><td>Low</td><td>None</td></tr>
+</table>
+
+<p>The timing is unambiguous. The bad release deployed at 00:05:44Z. The incident alert fired at 00:07:07Z. One minute and twenty-three seconds between deployment and P1.</p>
+
+<p>The release manager subagent was the first to surface this and frame it clearly:</p>
+
+<blockquote>"Candidate for rollback: <code>rpay-worker-2026.05.28-001</code>. Evidence strength: high. Rollback risk: low — the worker is a separate process with no schema changes. The payment creation API can stay online during rollback. Recommend rollback before any code changes."</blockquote>
+
+<hr>
+
+<h2>Rollback vs hotfix: making the decision</h2>
+
+<p>At 12:17 AM, the team had two options:</p>
+
+<table>
+  <tr>
+    <th>Option</th>
+    <th>Pros</th>
+    <th>Cons</th>
+    <th>Decision</th>
+  </tr>
+  <tr>
+    <td><strong>Roll back the worker</strong></td>
+    <td>Fast. Low code risk. Targets the exact change. No new code to write at midnight.</td>
+    <td>Does not add the guardrails that should have prevented this.</td>
+    <td>✓ Do this first</td>
+  </tr>
+  <tr>
+    <td><strong>Hotfix retry logic</strong></td>
+    <td>Permanent fix. Adds circuit breaker and backoff.</td>
+    <td>Risky to write and deploy new code during an active P1. Harder to review under pressure.</td>
+    <td>Do this after recovery</td>
+  </tr>
+</table>
+
+<p>The decision tree looks like this:</p>
+
+<pre>P1 payment incident
+        │
+        ▼
+Does evidence point to a recent worker release?
+  YES → Can rollback isolate the worker without corrupting payment state?
+          YES → Request human approval → Rollback → Monitor
+          NO  → Prepare targeted hotfix
+  NO  → Continue investigation</pre>
+
+<p>In R-Pay, rolling back the worker does not affect payment state at all. The worker only does reconciliation — it reads and updates existing PENDING payments. Rolling back to the previous version restores safe retry behavior without touching any in-flight payments.</p>
+
+<hr>
+
+<h2>The human approval gate</h2>
+
+<p>Rollback is a production-like action. Even in this local simulation, the UI requires an explicit approval step.</p>
+
+<p>The modal copy makes the boundary clear:</p>
+
+<blockquote>This is a local simulation. No real production action occurs. No real bank or UPI system is touched. Type APPROVE SIMULATION to proceed.</blockquote>
+
+<p>Raghu typed it. The rollback simulation ran.</p>
+
+<p>This pattern matters. In a real system, the approval text would be different — it might require a Slack approval message from a manager, or a two-person rule for financial system changes. But the shape is the same: Claude can prepare the action, explain the risk, and show the blast radius. Humans decide whether to run it.</p>
+
+<p>The prompt for preparing a rollback without executing it:</p>
+
+<pre>Prepare a rollback plan for the suspected R-Pay status reconciler release.
+
+Include:
+- target release version
+- services affected
+- expected customer impact during rollback
+- why rollback is safer than hotfix right now
+- approval required from whom
+- exact verification steps after rollback
+- rollback success criteria
+- monitoring window length
+
+Do not execute rollback.
+Wait for human approval.</pre>
+
+<hr>
+
+<h2>Recovery: what "stable" actually means</h2>
+
+<p>After the rollback simulation ran, the team watched the metrics recover:</p>
+
+<table>
+  <tr><th>Signal</th><th>During incident</th><th>After rollback (12:31 AM)</th></tr>
+  <tr><td>Payment success rate</td><td>91.4%</td><td style="color:#27ae60;font-weight:700">99.1%</td></tr>
+  <tr><td>P95 latency</td><td>4,800 ms</td><td style="color:#27ae60;font-weight:700">320 ms</td></tr>
+  <tr><td>Queue depth</td><td>98,200</td><td style="color:#27ae60;font-weight:700">1,800</td></tr>
+  <tr><td>DB pool usage</td><td>100%</td><td style="color:#27ae60;font-weight:700">48%</td></tr>
+  <tr><td>Retry rate</td><td>16,500/min</td><td style="color:#27ae60;font-weight:700">190/min</td></tr>
+</table>
+
+<p>The team did not call the incident resolved at the first green metric. They waited for 10 stable minutes. Recovery is not "the graph twitched green once." Recovery is sustained health across all signals.</p>
+
+<blockquote>The incident commander's rule: declare recovery only when every critical metric has been green for 10 consecutive minutes and no new symptoms have appeared.</blockquote>
+
+<hr>
+
+<h2>The permanent fix</h2>
+
+<p>After recovery, the code investigator helped draft the permanent fix. The key changes from <code>packages/shared/src/retry.ts</code>:</p>
+
+<pre><code>// BEFORE (buggy mode — what shipped)
+// Fixed 1-second polling, no backoff, no jitter, no budget, no circuit breaker
+
+// AFTER (fixed mode — what ships in the permanent fix)
+function shouldRetry(attempt: number, lastLatencyMs: number): RetryDecision {
+  // Exponential backoff: 1s → 2s → 4s → 8s → 16s
+  const backoffMs = Math.min(BASE_DELAY_MS * Math.pow(2, attempt), MAX_DELAY_MS);
+
+  // Jitter: ±30% to prevent thundering herd when many payments retry together
+  const jitter = backoffMs * 0.3 * (Math.random() * 2 - 1);
+  const delayMs = backoffMs + jitter;
+
+  // Retry budget: no payment gets more than 3 attempts per reconciliation window
+  if (attempt >= MAX_ATTEMPTS) return { shouldRetry: false, reason: "BUDGET_EXHAUSTED" };
+
+  // Circuit breaker: if the UPI switch is slow, pause all reconciliation temporarily
+  if (lastLatencyMs > CIRCUIT_BREAKER_THRESHOLD_MS) {
+    return { shouldRetry: false, reason: "CIRCUIT_OPEN", pauseMs: CIRCUIT_PAUSE_MS };
+  }
+
+  return { shouldRetry: true, delayMs };
+}</code></pre>
+
+<p>The key principle: the reconciler should back off under pressure, not increase pressure. Fixed 1-second polling does the opposite — it hammers harder exactly when the system is already struggling.</p>
+
+<p>The permanent fix prompt:</p>
+
+<pre>Create the permanent R-Pay retry fix.
+
+Requirements:
+- restore exponential backoff
+- add jitter (±30%)
+- enforce retry budget (max 3 attempts per payment per window)
+- add circuit breaker when payment network simulator is slow
+- preserve idempotency across retries
+- keep pending payments safe — do not mark SUCCESS without confirmation
+- add or update tests for healthy, buggy, and fixed retry modes
+- add alert recommendations for retry rate, queue depth, pending age, and DB pool saturation
+
+Return a patch summary and test results.</pre>
+
+<hr>
+
+<h2>Why tests missed it</h2>
+
+<p>This question matters for the RCA. The unit tests for retry logic existed and passed. How did a broken retry behavior ship?</p>
+
+<p>The answer: it was not a unit bug. It was an interaction bug.</p>
+
+<p>The failure required all of these to be true simultaneously:</p>
+
+<ol>
+  <li>UPI Switch Simulator in slow mode</li>
+  <li>Large number of PENDING payments (3,000+)</li>
+  <li>Worker retry loop with fixed 1-second interval</li>
+  <li>Shared database pool between worker and API</li>
+  <li>No circuit breaker to pause reconciliation under load</li>
+</ol>
+
+<p>Unit tests check one piece at a time. This bug only appeared when all five pieces were in play at once. That requires a load test or an integration test that simulates system pressure — not just function-level tests.</p>
+
+<p>The test additions needed after this incident:</p>
+
+<ul>
+  <li>Load test: 3,000 PENDING payments + slow UPI simulator + full retry cycle</li>
+  <li>Integration test: confirm retry rate stays within budget under slow payment network conditions</li>
+  <li>Alert test: verify retry rate and queue depth alerts fire at defined thresholds</li>
+  <li>Circuit breaker test: confirm reconciler pauses when simulator latency exceeds threshold</li>
+</ul>
+
+<hr>
+
+<h2>The RCA: what happened, why, and what we are doing about it</h2>
+
+<img src="https://raw.githubusercontent.com/raghuece455/r-pay/main/screenshots/ops-rca-final.png" alt="RCA draft panel">
+<p class="caption">RCA draft panel: the postmortem-writer subagent turns the timeline and evidence into a structured draft. Humans review before it is sent.</p>
+
+<p>The RCA generation prompt:</p>
+
+<pre>Generate an RCA draft for the Midnight Retry Storm.
+
+Use:
+- incident timeline
+- metrics (before, during, after)
+- log evidence
+- trace evidence
+- deployment history
+- mitigation actions
+- recovery evidence
+
+Include these sections:
+1. Summary (3 sentences)
+2. Customer impact
+3. Timeline
+4. Root cause
+5. Why monitoring caught it
+6. Why tests missed it
+7. Immediate mitigation
+8. Permanent fix
+9. Prevention items with owners and due dates
+
+Do not hide uncertainty.
+Do not blame individuals.
+Do not claim real money moved.</pre>
+
+<h3>The PM email (plain English version of the RCA)</h3>
+
+<p>Claude also drafted a non-technical summary for the project manager:</p>
+
+<blockquote>
+<p><strong>Subject: Incident resolved — Midnight Retry Storm — R-Pay sandbox</strong></p>
+<p>At 12:07 AM, our sandbox payment system began showing delayed confirmations. Users saw payments stuck in a waiting state. The root cause was a worker release that changed how the system checks on pending payments — it checked too frequently, without the safety measures that prevent it from overloading the database during slow network conditions.</p>
+<p>We rolled back the release at 12:22 AM and saw full recovery by 12:31 AM. No real money was involved because R-Pay is a sandbox. We are working on a permanent fix that restores the safe retry behavior and adds load tests to catch this pattern in future releases.</p>
+<p>The incident was resolved in 24 minutes. Prevention items are assigned and tracked.</p>
+</blockquote>
+
+<hr>
+
+<h2>Prevention items</h2>
+
+<table>
+  <tr><th>Item</th><th>Owner</th><th>Due</th></tr>
+  <tr><td>Add load test: slow payment network + 3,000 pending payments</td><td>Reliability</td><td>1 week</td></tr>
+  <tr><td>Alert on retry rate &gt; 800/min and queue depth &gt; 5,000</td><td>SRE</td><td>3 days</td></tr>
+  <tr><td>Alert on pending payment age &gt; 10 minutes</td><td>Backend</td><td>1 week</td></tr>
+  <tr><td>Require tests for any change to retry mode</td><td>Test engineering</td><td>3 days</td></tr>
+  <tr><td>Add canary checklist for worker releases</td><td>Release manager</td><td>1 week</td></tr>
+  <tr><td>Split reconciler DB pool from API DB pool</td><td>Platform</td><td>2 weeks</td></tr>
+  <tr><td>Review runbook after next game day</td><td>Incident commander</td><td>2 weeks</td></tr>
+</table>
+
+<hr>
+
+<h2>What Claude should never do during a payment incident</h2>
+
+<p>These rules live in <code>CLAUDE.md</code> and in every subagent definition. They are not optional:</p>
+
+<ul>
+  <li>Do not directly edit payment records in the database</li>
+  <li>Do not mark PENDING payments as SUCCESS to "clear the queue"</li>
+  <li>Do not delete audit logs to "clean things up"</li>
+  <li>Do not deploy or rollback without explicit human approval</li>
+  <li>Do not assume root cause from a single log line</li>
+  <li>Do not hide uncertainty in a hypothesis — say what is still unknown</li>
+  <li>Do not ignore user-facing impact while chasing elegant technical solutions</li>
+  <li>Do not bypass the runbook because the dashboard looks obvious</li>
+</ul>
+
+<hr>
+
+<h2>How to replay this story in the sandbox</h2>
+
+<ol>
+  <li>Install and run: <code>pnpm install &amp;&amp; pnpm seed &amp;&amp; pnpm dev</code></li>
+  <li>Open IncidentDesk: <code>http://localhost:3001/ops</code></li>
+  <li>Open simulations: <code>http://localhost:3001/ops/simulations</code></li>
+  <li>Trigger <strong>Midnight Retry Storm</strong> — watch metrics degrade in real time</li>
+  <li>Open the incident detail page — review timeline, logs, deployment, and evidence</li>
+  <li>Approve the rollback simulation (type <code>APPROVE SIMULATION</code>)</li>
+  <li>Deploy fixed retry logic simulation</li>
+  <li>Generate the RCA draft</li>
+  <li>Read the full RCA — it tells the whole story from metrics to prevention items</li>
+</ol>
+
+<p>The entire lifecycle in miniature: build → observe → break safely → investigate → mitigate → fix → verify → learn.</p>
+
+<hr>
+
+<h2>The final cheat sheet</h2>
+
+<table>
+  <tr><th>What you need</th><th>Use this</th><th>Why</th></tr>
+  <tr><td>Claude to remember project rules every session</td><td><code>CLAUDE.md</code></td><td>Persistent, reviewed, version-controlled</td></tr>
+  <tr><td>Repeat a multi-step investigation workflow</td><td>Skill</td><td>One command instead of typing 8 steps at 2 AM</td></tr>
+  <tr><td>Enforce a safety check regardless of Claude's plan</td><td>Hook</td><td>Automatic, not advisory</td></tr>
+  <tr><td>Investigate one specific area deeply</td><td>Subagent</td><td>Focused context, clear role, explicit safety boundary</td></tr>
+  <tr><td>Compare multiple independent hypotheses</td><td>Agent team</td><td>Parallel perspectives, surface disagreement</td></tr>
+  <tr><td>Build a custom scheduled or triggered agent workflow</td><td>Agent SDK</td><td>Run in your own infrastructure</td></tr>
+  <tr><td>Host a long-running production agent</td><td>Managed Agents</td><td>Anthropic-hosted, persistent environment</td></tr>
+  <tr><td>Take a risky production action</td><td>Human approval</td><td>Non-negotiable for payment systems</td></tr>
+</table>
+
+<hr>
+
+<h2>The real lesson</h2>
+
+<p>Claude did not save production. That is the wrong lesson.</p>
+
+<p>The right lesson is smaller and stronger:</p>
+
+<blockquote>
+Claude helped the team gather context, inspect evidence, compare options, prepare safe changes, and draft the RCA. The humans owned the decision, the approval, and the accountability.
+</blockquote>
+
+<p>That is how AI agents should work near payment systems. Fast hands. Clear evidence. Strong guardrails. Human approval where it matters.</p>
+
+<p>A developer working with Claude on an incident like this does not feel stressed. They feel supported. The agents handle the information gathering — finding the right log lines, correlating the right deployment, reading the retry code, building the timeline. The developers make the calls.</p>
+
+<p>That is the version of agentic AI that is actually useful in production: not autonomous, but deeply collaborative.</p>
+
+<hr>
+
+<h2>Series wrap-up</h2>
+
+<p>Across all three parts, we built a fictional UPI-style payment sandbox from scratch, equipped it with Claude Code project memory and incident tools, and walked through a realistic payment incident from pager to RCA.</p>
+
+<p>The R-Pay codebase is open source. Clone it, trigger the Midnight Retry Storm, and replay the incident yourself.</p>
+
+<p><strong>GitHub:</strong> <a href="https://github.com/raghuece455/r-pay">github.com/raghuece455/r-pay</a></p>
+
+<p>If you have questions — about Claude Code, about payment state machines, about incident response, or about anything else in this series — drop them in the comments. I read every one.</p>
+
+<hr>
+
+<p><em>Tags: Claude Code, Incident Response, SRE, AI Agents, Payments</em></p>
+
+</body>
+</html>

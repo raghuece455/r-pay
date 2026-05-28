@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Building R-Pay: A UPI-Style Payment App with Claude Code Agents — Part 1</title>
+<style>
+  body { font-family: Georgia, serif; max-width: 740px; margin: 40px auto;
+         line-height: 1.8; color: #292929; padding: 0 20px; }
+  h1   { font-size: 2.1em; font-weight: 700; margin-bottom: 0.2em; line-height: 1.25; }
+  h2   { font-size: 1.45em; font-weight: 700; margin-top: 2.2em; margin-bottom: 0.4em; }
+  h3   { font-size: 1.15em; font-weight: 700; margin-top: 1.6em; margin-bottom: 0.3em; }
+  p    { margin: 1em 0; }
+  pre  { background: #f4f4f4; padding: 18px; border-radius: 5px;
+         overflow-x: auto; font-size: 0.85em; line-height: 1.5; }
+  code { font-family: 'Courier New', monospace; }
+  p code, li code { background: #f0f0f0; padding: 2px 6px;
+                    border-radius: 3px; font-size: 0.88em; }
+  hr   { border: none; border-top: 1px solid #e0e0e0; margin: 2.2em 0; }
+  blockquote { border-left: 3px solid #f5a623; margin: 1.5em 0;
+               padding: 0.6em 1.5em; color: #555; font-style: italic;
+               background: #fffbf3; }
+  table { border-collapse: collapse; width: 100%; margin: 1.5em 0; font-size: 0.91em; }
+  th, td { border: 1px solid #ddd; padding: 9px 14px; text-align: left; }
+  th   { background: #f5f5f5; font-weight: 700; }
+  ul, ol { margin: 1em 0; padding-left: 2em; }
+  li   { margin: 0.45em 0; }
+  .caption { font-size: 0.82em; color: #757575; text-align: center;
+             margin-top: -0.5em; margin-bottom: 1.5em; font-style: italic; }
+  img  { width: 100%; border-radius: 8px; margin: 1em 0; border: 1px solid #e8e8e8; }
+  .series-nav { background: #f0f7ff; border-left: 4px solid #2563eb; padding: 12px 18px;
+                margin: 1.5em 0; border-radius: 4px; font-size: 0.93em; }
+</style>
+</head>
+<body>
+
+<p class="series-nav">
+  <strong>Claude Agents &amp; R-Pay — 3-Part Series</strong><br>
+  <strong>Part 1:</strong> Building the payment app with Claude Code (you are here)<br>
+  Part 2: Turning Claude into an incident response team<br>
+  Part 3: The Midnight Retry Storm — investigate, fix, deploy, write the RCA
+</p>
+
+<h1>Building R-Pay: A UPI-Style Payment App with Claude Code Agents</h1>
+
+<p><em>How we used Claude Code like a senior engineering partner to design, build, and verify a payment sandbox — without pretending payment systems are simple.</em></p>
+
+<p><em>Read time: ~13 minutes</em></p>
+
+<hr>
+
+<h2>The most dangerous prompt in software</h2>
+
+<pre>Build me a payment app.</pre>
+
+<p>It sounds productive. It is also how you get a beautiful demo with missing idempotency, no audit trail, unclear payment states, and a "success" screen that lies to the user.</p>
+
+<p>Payment systems are genuinely hard. Not because the UI is hard. Because the edge cases are invisible: what happens when the user taps Pay twice? What happens when the network drops between the request and the confirmation? What does "success" actually mean if the payment network has not confirmed it?</p>
+
+<p>So for R-Pay — a fictional UPI-style payment sandbox inspired by common Indian payment app patterns — we did something different. We did not ask Claude Code to magically build everything in one shot. We asked it to slow down, interview us, write useful design docs, design the state machine, implement one vertical slice, and prove it worked.</p>
+
+<p>That is the difference between using Claude as a chatbot and using Claude Code as an agentic coding partner.</p>
+
+<hr>
+
+<h2>First: what is Claude Code and what makes it an "agent"?</h2>
+
+<p>Claude Code is Anthropic's CLI tool for working with Claude inside your codebase. But calling it a "CLI" undersells it.</p>
+
+<p>What makes Claude Code an <em>agent</em> is that it can:</p>
+
+<ul>
+  <li><strong>Gather context</strong> — read your files, understand your architecture, look at test results</li>
+  <li><strong>Choose actions</strong> — decide which files to edit, which tests to run, in what order</li>
+  <li><strong>Use tools</strong> — actually make edits, run commands, check output</li>
+  <li><strong>Iterate</strong> — try something, see what happens, adjust</li>
+</ul>
+
+<p>A chatbot answers questions. An agent takes actions toward a goal. Claude Code is the second one.</p>
+
+<p>This matters for payment code because the goal is not just "write code that compiles." The goal is "write code that handles duplicate requests correctly, validates state transitions, and preserves an audit trail." Those are correctness goals that require reading tests, running them, and iterating.</p>
+
+<hr>
+
+<h2>What is R-Pay?</h2>
+
+<p>R-Pay (also called Raghu's Pay) is a fictional UPI-style payment sandbox for India. It is not a real payment system. It does not connect to:</p>
+
+<ul>
+  <li>Real UPI rails or NPCI systems</li>
+  <li>Real banks or PSPs</li>
+  <li>Real payment gateways</li>
+  <li>Real money</li>
+</ul>
+
+<p>Instead, it uses a local UPI Switch Simulator — a sandbox service that mimics how a payment network would behave. This lets us practice the engineering shape of a real payment system without crossing financial or legal boundaries.</p>
+
+<p>R-Pay has two surfaces:</p>
+
+<table>
+  <tr><th>Surface</th><th>Who uses it</th><th>What it does</th></tr>
+  <tr><td>Consumer App</td><td>End users (Raghu)</td><td>Send payments, scan QR, view status and history</td></tr>
+  <tr><td>IncidentDesk</td><td>Engineers</td><td>Monitor health, simulate incidents, investigate, recover, write RCA</td></tr>
+</table>
+
+<p>The tech stack is a TypeScript monorepo:</p>
+
+<table>
+  <tr><th>Layer</th><th>Technology</th></tr>
+  <tr><td>Consumer + ops UI</td><td>Next.js 15 (App Router, React Server Components)</td></tr>
+  <tr><td>API</td><td>Express + Prisma + PostgreSQL</td></tr>
+  <tr><td>Worker</td><td>Background reconciler with retry logic</td></tr>
+  <tr><td>Shared</td><td>TypeScript types, payment state machine, Zod schemas</td></tr>
+  <tr><td>Simulator</td><td>Local UPI Switch Simulator (no real APIs)</td></tr>
+</table>
+
+<hr>
+
+<h2>Step 1: Make Claude interview you first</h2>
+
+<p>The first prompt should not be an implementation prompt.</p>
+
+<p>It should make Claude ask questions. Here is the prompt we used:</p>
+
+<pre>You are helping me build R-Pay, a fictional UPI-style payment sandbox for India.
+
+Before writing code, interview me like a senior product engineer.
+
+Ask practical questions about:
+- user flows
+- payment states
+- idempotency
+- UPI Switch Simulator behavior
+- transaction history
+- audit logs
+- support flows
+- observability
+
+Safety boundary:
+- no real UPI APIs
+- no bank APIs
+- no real money movement
+- use only a local payment network simulator
+
+After the interview, summarize the MVP scope and risks.</pre>
+
+<p>This prompt does two things. It tells Claude the domain is payment-like, which raises the safety bar. And it prevents the classic "giant implementation first, requirements later" mistake.</p>
+
+<p>Claude came back with questions like: "What happens if the same payment request is sent twice?" and "Who must approve if a payment gets stuck?" Those questions forced us to define idempotency and audit requirements before writing a single line of code.</p>
+
+<hr>
+
+<h2>Step 2: Write useful design docs, not museum docs</h2>
+
+<p>After the interview, we asked Claude to generate design documents. Not long documents nobody reads — short, practical ones that the code actually references.</p>
+
+<p>The result lives in <code>docs/architecture/</code>:</p>
+
+<ul>
+  <li><code>SPEC.md</code> — product scope and safety boundary</li>
+  <li><code>ARCHITECTURE.md</code> — system components and how they connect</li>
+  <li><code>DATA_MODEL.md</code> — Prisma schema rationale</li>
+  <li><code>API_DESIGN.md</code> — endpoint contracts</li>
+  <li><code>PAYMENT_STATE_MACHINE.md</code> — states and allowed transitions</li>
+  <li><code>OBSERVABILITY_PLAN.md</code> — what metrics matter and why</li>
+</ul>
+
+<p>Good docs are not ceremony. They are memory for humans and for Claude.</p>
+
+<p>Every Claude Code session starts fresh. When Claude reads <code>ARCHITECTURE.md</code> at the start of a new session, it understands the system without you re-explaining it. That matters a lot over a long project.</p>
+
+<hr>
+
+<h2>Step 3: Design the state machine before the screen</h2>
+
+<p>The payment status screen looks simple. It shows "Success" or "Failed." But what that screen shows depends on a backend state machine that must be exactly right.</p>
+
+<p>R-Pay's payment states are:</p>
+
+<pre>CREATED → PROCESSING → SUCCESS
+                     → FAILED
+                     → PENDING → SUCCESS (later confirmation)
+                              → FAILED
+                              → TIMED_OUT → RECONCILED</pre>
+
+<p>The most important rule in the whole codebase is blunt:</p>
+
+<blockquote>R-Pay must not mark a payment SUCCESS unless the payment network simulator confirms it.</blockquote>
+
+<p>This is enforced in code, not just in policy. In <code>packages/shared/src/state-machine.ts</code>, every transition is validated. In the payment service, there is an explicit guard:</p>
+
+<pre><code>// packages/shared/src/state-machine.ts
+assertPaymentTransition(fromStatus, toStatus);
+
+// apps/api/src/services/payment-service.ts
+if (params.to === "SUCCESS" && !params.confirmedByMock && !payment.confirmedByMock) {
+  throw new HttpError(409, "Cannot mark payment SUCCESS without mock UPI confirmation");
+}</code></pre>
+
+<p>This is not fancy code. It is adult supervision for a dangerous domain.</p>
+
+<p>We asked Claude to review the state machine before implementing any UI:</p>
+
+<pre>Review the R-Pay payment state machine.
+
+Check:
+- every allowed transition
+- every rejected transition
+- whether SUCCESS requires payment network confirmation
+- whether PENDING can be reconciled safely
+- whether tests cover invalid transitions
+
+Do not change behavior yet.
+Return findings first, then suggest small patches.</pre>
+
+<p>Claude returned a list of gaps. We fixed them before touching the UI.</p>
+
+<hr>
+
+<h2>Step 4: Build one vertical slice</h2>
+
+<p>The first useful slice was end-to-end but narrow:</p>
+
+<ol>
+  <li>User enters receiver UPI ID and amount</li>
+  <li>Web app sends <code>POST /api/payments</code> with an <code>Idempotency-Key</code> header</li>
+  <li>API creates the payment in state <code>CREATED</code></li>
+  <li>API transitions to <code>PROCESSING</code></li>
+  <li>API calls the UPI Switch Simulator</li>
+  <li>Simulator returns <code>SUCCESS</code>, <code>FAILED</code>, or <code>PENDING</code></li>
+  <li>API records the attempt and transitions state</li>
+  <li>User sees status screen</li>
+</ol>
+
+<p>Here is the actual request flow in the Express API (<code>apps/api/src/app.ts</code>):</p>
+
+<pre><code>app.post("/api/payments", asyncHandler(async (request, response) => {
+  const idempotencyKey = request.header("Idempotency-Key") ?? undefined;
+  const result = await createPayment(request.body, idempotencyKey, config.mockUpiMode);
+  response.status(result.duplicate ? 200 : 201).json(result);
+}));</code></pre>
+
+<p>Notice two things. First, the idempotency key comes from the request header — it is required. Second, the response status is 200 for a duplicate (returning the existing payment) and 201 for a new one. That distinction matters for clients that need to know whether their request created something new.</p>
+
+<img src="https://raw.githubusercontent.com/raghuece455/r-pay/main/screenshots/rpay-pay-final.png" alt="R-Pay payment screen">
+<p class="caption">The payment form: receiver UPI ID, amount chips, and note field. Behind this screen is a state machine, idempotency check, and audit log.</p>
+
+<hr>
+
+<h2>Why idempotency is not optional in payments</h2>
+
+<p>Mobile networks retry. Users tap buttons twice. API clients time out and try again. If a duplicate request creates a duplicate payment, your system is not "eventually consistent." It is wrong.</p>
+
+<table>
+  <tr><th>Problem</th><th>Without idempotency</th><th>With idempotency</th></tr>
+  <tr><td>User taps Pay twice</td><td>Two payment records, double charge</td><td>One payment, one idempotent replay</td></tr>
+  <tr><td>Network timeout, client retries</td><td>Possible duplicate payment</td><td>Client safely retries, gets same result</td></tr>
+  <tr><td>Support investigation</td><td>Ambiguous duplicate records</td><td>One stable reference ID</td></tr>
+</table>
+
+<p>In R-Pay, every payment requires an <code>Idempotency-Key</code> header. If the same user sends the same key twice, the API returns the original payment and logs an idempotent replay event. No duplicate transaction. No silent failure.</p>
+
+<pre><code>// apps/api/src/services/payment-service.ts
+const existing = await prisma.payment.findUnique({
+  where: { userId_idempotencyKey: { userId: user.id, idempotencyKey } }
+});
+
+if (existing) {
+  await prisma.auditLog.create({
+    data: {
+      paymentId: existing.id,
+      event: "payment.idempotent_replay",
+      actor: "api",
+      metadata: { idempotencyKey, reason: "DUPLICATE_REQUEST" }
+    }
+  });
+  return { payment: toApiPayment(existing), duplicate: true };
+}</code></pre>
+
+<hr>
+
+<h2>Audit logs are a product feature</h2>
+
+<p>Audit logs sound internal until a user opens support and says: "My payment is stuck. What happened?"</p>
+
+<p>R-Pay stores a full event timeline for every payment:</p>
+
+<ul>
+  <li><code>payment.created</code> — when the payment was created and by whom</li>
+  <li><code>payment.state_changed</code> — from which state to which, with reason</li>
+  <li><code>payment.idempotent_replay</code> — if the same request was sent twice</li>
+  <li><code>payment.pending_retry_observed</code> — if the reconciler checked again</li>
+</ul>
+
+<p>This gives the support team (and Claude during an incident) a clear timeline. It is how a later investigation can say "the payment was created at 12:07, transitioned to PENDING at 12:07:03, and the reconciler checked it 14 times before giving up."</p>
+
+<img src="https://raw.githubusercontent.com/raghuece455/r-pay/main/screenshots/rpay-transactions-final.png" alt="Transaction history with receipts">
+<p class="caption">Transaction history: every payment has a reference ID, idempotency key, attempt count, and audit timeline you can inspect.</p>
+
+<hr>
+
+<h2>CLAUDE.md: the most important file in the repo</h2>
+
+<p>Every Claude Code session starts fresh. It does not remember what you told it last time. Without a way to persist project rules, you end up repeating the same safety instructions in every prompt.</p>
+
+<p>The solution is <code>CLAUDE.md</code>. It is a Markdown file in your repo root that Claude Code reads at the start of every session. It is project memory that you write on purpose.</p>
+
+<p>R-Pay's <code>CLAUDE.md</code> tells Claude:</p>
+
+<ul>
+  <li>R-Pay is fictional and sandbox-only — no real payment APIs</li>
+  <li>Payment code is high-risk — treat it carefully</li>
+  <li>Every payment needs an idempotency key</li>
+  <li><code>SUCCESS</code> requires payment network simulator confirmation</li>
+  <li>Audit logs must never be deleted</li>
+  <li>Production-like deployment or rollback needs human approval</li>
+  <li>Run tests after changing payment state logic</li>
+</ul>
+
+<p>The point is not to make Claude perfect. The point is to reduce repeat mistakes. A rule in <code>CLAUDE.md</code> is a rule Claude sees every time, not just when you remember to say it.</p>
+
+<p>Here is the pattern to make your own:</p>
+
+<pre>Create a CLAUDE.md for this repo.
+
+Include:
+- product purpose
+- repo structure
+- setup commands
+- safety boundary
+- payment state machine rules
+- idempotency requirements
+- audit log requirements
+- incident response rules
+- testing expectations
+
+Keep it short enough that Claude will actually follow it.
+Use concrete rules, not vague advice.</pre>
+
+<hr>
+
+<h2>The build loop that worked</h2>
+
+<p>The useful workflow was not "ask Claude to build everything." It was a short cycle:</p>
+
+<pre>Idea
+  → Product interview (Claude asks questions)
+  → Design docs (Claude writes, you review)
+  → State machine (Claude reviews, you approve)
+  → Small vertical slice (Claude implements)
+  → Tests (Claude generates and runs)
+  → Update CLAUDE.md (capture new rules)
+  → Next slice</pre>
+
+<p>Claude Code is strongest when it can gather context, take action, and verify results in a tight loop. That means reading files, editing TypeScript, running tests, and seeing output. The key move is not "write code faster." It is "make the repo teach Claude how to behave."</p>
+
+<hr>
+
+<h2>What Claude should never do in payment code</h2>
+
+<p>Speed without judgment is dangerous in payment code. Be explicit about the limits:</p>
+
+<ul>
+  <li>Do not skip idempotency</li>
+  <li>Do not mark a payment <code>SUCCESS</code> without payment network confirmation</li>
+  <li>Do not delete audit logs</li>
+  <li>Do not change the payment state machine without tests</li>
+  <li>Do not connect to real payment APIs in this sandbox</li>
+  <li>Do not hide payment failures behind happy UI copy</li>
+  <li>Do not "fix" stuck payments by editing records directly</li>
+</ul>
+
+<p>These rules live in <code>CLAUDE.md</code>. They are not just suggestions — they are instructions Claude sees every session.</p>
+
+<hr>
+
+<h2>The consumer app: what you can run locally</h2>
+
+<p>After the build loop, R-Pay's consumer app at <code>http://localhost:3001</code> shows:</p>
+
+<img src="https://raw.githubusercontent.com/raghuece455/r-pay/main/screenshots/rpay-home-final.png" alt="R-Pay home screen">
+<p class="caption">R-Pay home screen: balance card, UPI ID, quick actions, recent contacts, and transaction history — a full consumer payment app in a sandbox.</p>
+
+<ol>
+  <li>A home dashboard with Raghu's balance (₹12,450), masked bank account ending 4242, and UPI ID <code>raghu@rpay</code></li>
+  <li>Quick actions: Scan &amp; Pay, Pay UPI ID, Pay Contact, History</li>
+  <li>A payment form with sandbox UPI IDs, amount chips, and a note field</li>
+  <li>A QR scan simulation (no camera required)</li>
+  <li>A payment status screen for SUCCESS, PENDING, FAILED, and TIMED_OUT</li>
+  <li>Transaction history with search and receipt detail view</li>
+  <li>A support page for reporting payment issues</li>
+</ol>
+
+<img src="https://raw.githubusercontent.com/raghuece455/r-pay/main/screenshots/rpay-status-final.png" alt="Payment status screen">
+<p class="caption">Payment status screen: the state depends on validated transitions and simulator confirmation — not just what the UI wants to show.</p>
+
+<hr>
+
+<h2>Key takeaways from Part 1</h2>
+
+<ul>
+  <li><strong>Interview before implementing.</strong> The first Claude prompt should make Claude ask questions, not write code.</li>
+  <li><strong>Design docs are Claude's memory.</strong> They reduce the time spent re-explaining the system.</li>
+  <li><strong>State machines belong in shared packages.</strong> <code>packages/shared/src/state-machine.ts</code> enforces rules everywhere.</li>
+  <li><strong>Idempotency is mandatory.</strong> No exceptions for payment APIs.</li>
+  <li><strong>Audit logs are a product feature.</strong> They answer support questions and enable incident investigation.</li>
+  <li><strong><code>CLAUDE.md</code> is project memory.</strong> Every session starts with the same rules.</li>
+  <li><strong>Build one slice at a time.</strong> Correctness over surface area.</li>
+</ul>
+
+<hr>
+
+<h2>What's next</h2>
+
+<p>R-Pay now has a working payment flow, state machine, idempotency, and audit logs. Claude helped build it by moving from idea to docs to code to tests.</p>
+
+<p>But payment systems do not become scary when the happy path works.</p>
+
+<p>They become scary at midnight, when the success rate drops, latency jumps, and the status reconciler starts hammering the database.</p>
+
+<p>In <strong>Part 2</strong>, we prepare Claude for that night — before the pager goes off. We will cover memory, skills, hooks, subagents, agent teams, and IncidentDesk.</p>
+
+<hr>
+
+<p><em>R-Pay is open source: <a href="https://github.com/raghuece455/r-pay">github.com/raghuece455/r-pay</a></em></p>
+<p><em>Tags: Claude Code, AI Agents, TypeScript, Payments, Engineering</em></p>
+
+</body>
+</html>

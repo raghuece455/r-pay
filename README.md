@@ -122,19 +122,6 @@ From the command line:
 pnpm simulate:incident
 ```
 
-## Safety Boundary
-
-This repository must stay sandbox-only.
-
-- No real UPI APIs.
-- No NPCI, bank, PSP, PhonePe, Google Pay, Paytm, BHIM, or payment gateway APIs.
-- No real money movement.
-- No copied payment app UI, branding, colors, logos, layouts, screenshots, or assets.
-- No committed secrets.
-- No autonomous production payment-state correction.
-
-Payment state changes are validated by a shared state machine and written to audit logs.
-
 ## Docs
 
 - [Architecture](docs/architecture/ARCHITECTURE.md)

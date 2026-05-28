@@ -1,5 +1,10 @@
 # R-Pay
 
+![Node](https://img.shields.io/badge/node-20-green)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.8-blue)
+![CI](https://github.com/raghuece455/r-pay/actions/workflows/ci.yml/badge.svg)
+![License](https://img.shields.io/badge/license-MIT-blue)
+
 R-Pay, also called Raghu's Pay, is a fictional UPI-style payment product for India. It is a production-style full-stack demo for learning payment safety, state machines, incident response, observability, RCA workflows, and Claude Code agent collaboration.
 
 R-Pay is not a real payment system. It does not connect to real UPI rails, NPCI, banks, PSPs, PhonePe, Google Pay, payment gateways, or real money movement. The app uses a local sandbox payment network simulator only.

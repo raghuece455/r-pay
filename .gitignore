@@ -10,3 +10,4 @@ coverage
 prisma/dev.db
 playwright-report
 test-results
+.claude/

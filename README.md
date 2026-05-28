@@ -146,4 +146,3 @@ Payment state changes are validated by a shared state machine and written to aud
 - [Payment incident runbook](docs/runbooks/payment-incident-runbook.md)
 - [Screenshot guide](docs/SCREENSHOTS.md)
 
-The Medium article drafts are intentionally not part of the GitHub-ready copy. The final article series should be written from this working codebase and the Midnight Retry Storm simulation.
